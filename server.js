@@ -73,7 +73,7 @@ db.serialize(() => {
         due_date DATE,
         hours_due INT DEFAULT 0,
         penalty INT DEFAULT 0,
-        book_status TEXT DEFAULT 'UNRETURNED',
+        book_status TEXT DEFAULT 'PENDING',
         FOREIGN KEY (req_id) REFERENCES book_req(req_id) ON DELETE CASCADE,
         FOREIGN KEY (book_id) REFERENCES available_books(book_id)
       );
@@ -205,7 +205,35 @@ const authenticateToken = (req, res, next) => {
       res.json({ books: booksWithImages });
     });
   });
-  
+
+// API to fetch top 5 most borrowed books
+app.get('/api/top-borrowed-books', (req, res) => {
+  const query = `
+    SELECT ab.book_id, ab.title, ab.cover_image, COUNT(bb.book_id) AS borrow_count
+    FROM borrowed_books bb
+    JOIN available_books ab ON bb.book_id = ab.book_id
+    GROUP BY bb.book_id
+    ORDER BY borrow_count DESC
+    LIMIT 5;
+  `;
+
+  db.all(query, [], (err, rows) => {
+    if (err) {
+      console.error('Error fetching top borrowed books:', err.message);
+      return res.status(500).json({ message: 'Error fetching top borrowed books' });
+    }
+
+    // Convert cover_image BLOB to Base64 for display
+    const booksWithBase64Images = rows.map(book => {
+      const base64Image = book.cover_image.toString('base64');
+      return { ...book, cover_image: base64Image };
+    });
+
+    res.json(booksWithBase64Images);
+  });
+});
+
+
   
     // Get book details by ID
   app.get('/books/:id', (req, res) => {
@@ -388,6 +416,8 @@ app.get('/available-books', (req, res) => {
 
 
 
+
+
 // Dashboard Page APIs
   //Overview Page
   app.get('/request-counts', (req, res) => {
@@ -434,8 +464,36 @@ app.get('/request-date', (req, res) => {
   });
 });
 
+//Chart Data
+app.get('/chart-data', (req, res) => {
+  const query = `
+    SELECT 
+      strftime('%m', req_created) AS month,
+      SUM(CASE WHEN status = 'Pending' THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN status = 'Approved' THEN 1 ELSE 0 END) AS approved,
+      SUM(CASE WHEN status = 'Overdue' THEN 1 ELSE 0 END) AS overdue
+    FROM book_req
+    GROUP BY month
+    ORDER BY month;
+  `;
 
+  db.all(query, [], (err, rows) => {
+    if (err) {
+      res.status(500).json({ error: err.message });
+      return;
+    }
 
+    // Format the data for the chart
+    const chartData = {
+      months: rows.map(row => row.month),
+      pending: rows.map(row => row.pending),
+      approved: rows.map(row => row.approved),
+      overdue: rows.map(row => row.overdue),
+    };
+
+    res.json(chartData);
+  });
+});
 
 // Show Requests
   // Show all requests
@@ -938,6 +996,21 @@ app.get('/overdue-req', (req, res) => {
     });
 });
 
+// Show Borrowers
+app.get('/borrowers', (req, res) => {
+  db.all(
+    `SELECT borrower_id, first_name, last_name, department, email, contact_number, borrower_type FROM borrowers`,
+    [], // You can pass parameters to the query if necessary
+    (err, rows) => {
+      if (err) {
+        res.status(500).json({ error: err.message }); // Handle any error that occurs
+        return;
+      }
+      res.json(rows); // Return the rows as the API response
+    }
+  );
+});
+
 app.get('/return-req', (req, res) => {
   const sql = `
     SELECT 
@@ -1039,16 +1112,41 @@ app.get('/return-req', (req, res) => {
 });
 
 
+
+// Endpoint to get total count of borrowers
+app.get("/api/borrowers/count", (req, res) => {
+  db.get("SELECT COUNT(*) AS total_borrowers FROM borrowers", [], (err, row) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ error: "An error occurred" });
+    }
+    res.json({ total_borrowers: row.total_borrowers });
+  });
+});
+
+// Endpoint to get borrower type distribution
+app.get("/api/borrowers/type-distribution", (req, res) => {
+  db.all("SELECT borrower_type, COUNT(*) AS count FROM borrowers GROUP BY borrower_type", [], (err, rows) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ error: "An error occurred" });
+    }
+    res.json({ borrower_types: rows });
+  });
+});
+
+
+
 // Buttons 
   // Approve a request
   app.post('/approve-request', (req, res) => {
     const { reqId } = req.body;
-
+  
     // Validate reqId
     if (!reqId) {
-        return res.status(400).json({ message: 'Request ID is required.' });
+      return res.status(400).json({ message: 'Request ID is required.' });
     }
-
+  
     // Query to get the borrower type and associated book IDs based on the request ID
     const getBorrowerDetailsQuery = `
       SELECT borrowers.borrower_type, book_req.borrower_id, bb.book_id
@@ -1057,91 +1155,78 @@ app.get('/return-req', (req, res) => {
       JOIN borrowed_books AS bb ON book_req.req_id = bb.req_id
       WHERE book_req.req_id = ?
     `;
-
+  
     // Define due days per borrower type
     const rules = {
-        student: 7,   // 7 days
-        faculty: 120, // 1 semester (~120 days)
-        employee: 7,  // 7 days
+      student: 7, // 7 days
+      faculty: 120, // 1 semester (~120 days)
+      employee: 7, // 7 days
     };
-
+  
     db.all(getBorrowerDetailsQuery, [reqId], (err, rows) => {
-        if (err) {
-            console.error('Error fetching borrower details:', err.message);
-            return res.status(500).json({ message: 'Error fetching borrower details' });
-        }
-
-        if (rows.length === 0) {
-            return res.status(404).json({ message: 'Request or borrower not found.' });
-        }
-
-        const borrowerType = rows[0].borrower_type;
-        const borrowerId = rows[0].borrower_id;
-
-        const dueDays = rules[borrowerType];
-
-        // Calculate the due date based on the current date
-        const dueDate = new Date();
-        dueDate.setDate(dueDate.getDate() + dueDays);
-        const formattedDueDate = dueDate.toISOString().split('T')[0]; // YYYY-MM-DD
-
-        // Step 1: Update the request status and approval date
-        db.run(
-            'UPDATE book_req SET status = ?, req_approve = CURRENT_DATE WHERE req_id = ?',
-            ['Approved', reqId],
+      if (err) {
+        console.error('Error fetching borrower details:', err.message);
+        return res.status(500).json({ message: 'Error fetching borrower details' });
+      }
+  
+      if (rows.length === 0) {
+        return res.status(404).json({ message: 'Request or borrower not found.' });
+      }
+  
+      const borrowerType = rows[0].borrower_type;
+      const borrowerId = rows[0].borrower_id;
+  
+      const dueDays = rules[borrowerType];
+  
+      // Calculate the due date based on the current date
+      const dueDate = new Date();
+      dueDate.setDate(dueDate.getDate() + dueDays);
+      const formattedDueDate = dueDate.toISOString().split('T')[0]; // YYYY-MM-DD
+  
+      // Step 1: Update the request status and approval date
+      db.run(
+        'UPDATE book_req SET status = ?, req_approve = CURRENT_DATE WHERE req_id = ?',
+        ['Approved', reqId],
+        function (err) {
+          if (err) {
+            console.error('Error updating book request status:', err.message);
+            return res.status(500).json({ message: 'Error updating book request status' });
+          }
+  
+          // Step 2: Update the due date and book status for all books associated with the request
+          db.run(
+            'UPDATE borrowed_books SET due_date = ?, book_status = ? WHERE req_id = ?',
+            [formattedDueDate, 'UNRETURNED', reqId],
             function (err) {
-                if (err) {
-                    console.error('Error updating book request status:', err.message);
-                    return res.status(500).json({ message: 'Error updating book request status' });
-                }
-
-                // Step 2: Update the due date for all books associated with the request
-                db.run(
-                    'UPDATE borrowed_books SET due_date = ? WHERE req_id = ?',
-                    [formattedDueDate, reqId],
-                    function (err) {
-                        if (err) {
-                            console.error('Error updating due date for books:', err.message);
-                            return res.status(500).json({ message: 'Error updating due date for books' });
-                        }
-
-                        // Step 3: Decrease the number of available books
-                        const updateAvailableBooksPromises = rows.map(row => {
-                            return new Promise((resolve, reject) => {
-                                db.run(
-                                    'UPDATE available_books SET available_copies = available_copies - 1 WHERE book_id = ? AND available_copies > 0',
-                                    [row.book_id],
-                                    function (err) {
-                                        if (err) {
-                                            console.error('Error updating available books:', err.message);
-                                            return reject(err);
-                                        }
-                                        resolve();
-                                    }
-                                );
-                            });
-                        });
-
-                        Promise.all(updateAvailableBooksPromises)
-                            .then(() => {
-                                // Respond with success and the updated due date
-                                res.status(200).json({
-                                    message: 'Book request approved successfully',
-                                    dueDate: formattedDueDate,
-                                    borrowerType: borrowerType,
-                                    borrowerId: borrowerId,
-                                });
-                            })
-                            .catch(err => {
-                                console.error('Error updating available books:', err.message);
-                                res.status(500).json({ message: 'Error updating available books' });
-                            });
-                    }
-                );
+              if (err) {
+                console.error('Error updating due date and book status:', err.message);
+                return res.status(500).json({ message: 'Error updating due date and book status' });
+              }
+  
+              // Step 3: Reduce available copies for the specific book
+              const updateAvailableCopiesQuery = `
+                UPDATE available_books
+                SET available_copies = available_copies - 1
+                WHERE book_id = ?
+              `;
+  
+              rows.forEach((row) => {
+                db.run(updateAvailableCopiesQuery, [row.book_id], (err) => {
+                  if (err) {
+                    console.error(`Error reducing available copies for book_id ${row.book_id}:`, err.message);
+                  }
+                });
+              });
+  
+              // Respond to the client after all operations
+              res.status(200).json({ message: 'Request approved, due date updated, and available copies reduced successfully.' });
             }
-        );
+          );
+        }
+      );
     });
-});
+  });
+  
 
 
  // Reject a request
@@ -1252,6 +1337,30 @@ app.delete('/delete-book/:bookId', async (req, res) => {
   }
 });
 
+
+// Show Total Books (Unique Book Count)
+app.get('/api/total-books', (req, res) => {
+  db.get(
+    `SELECT COUNT(DISTINCT title) AS total_books FROM available_books`, 
+    (err, row) => {
+      if (err) {
+        res.status(500).json({ error: err.message });
+        return;
+      }
+
+      // Log the result to check the value
+      console.log('Total Books Row:', row);
+
+      // If row is null or doesn't contain a valid total_books value, log it
+      if (!row || row.total_books === null) {
+        console.log('No total books found or result is null.');
+      }
+
+      res.json({ totalBooks: row?.total_books || 0 }); // Respond with 0 if no value is found
+    }
+  );
+});
+
  //Show all books
  app.get('/book-list', (req, res) => {
   db.all(
@@ -1266,6 +1375,48 @@ app.delete('/delete-book/:bookId', async (req, res) => {
     }
   );
 });
+
+//Show available book copies
+app.get('/api/total-available-books', async (req, res) => {
+  try {
+    const query = `SELECT SUM(available_copies) AS total_available FROM available_books`;
+    db.get(query, (err, row) => {
+      if (err) {
+        console.error('Database Error:', err.message);
+        return res.status(500).json({ error: 'Database query failed' });
+      }
+
+      res.json({ totalAvailableBooks: row?.total_available || 0 });
+    });
+  } catch (error) {
+    console.error('Server Error:', error);
+    res.status(500).json({ error: 'An error occurred while fetching total available books.' });
+  }
+});
+
+//Show Total Borrowed Books
+app.get('/api/total-borrowed-books', async (req, res) => {
+  try {
+    const query = `SELECT COUNT(*) AS total_borrowed FROM borrowed_books WHERE book_status = 'UNRETURNED'`;
+
+    // Use callback to log results and handle errors
+    db.get(query, (err, row) => {
+      if (err) {
+        console.error('Database Error:', err.message);
+        return res.status(500).json({ error: 'Database query failed' });
+      }
+
+      // Return the response
+      res.json({ totalBorrowedBooks: row?.total_borrowed || 0 });
+    });
+  } catch (error) {
+    console.error('Server Error:', error);
+    res.status(500).json({ error: 'An error occurred while fetching total borrowed books.' });
+  }
+});
+
+
+
 
 // API to fetch categories
 app.get("/categories", (req, res) => {
@@ -1339,7 +1490,7 @@ app.post("/books", upload.single("cover_image"), (req, res) => {
 });
 
 
-
+//Book Details
 app.get("/book/:bookId", (req, res) => {
   const { bookId } = req.params;
 
