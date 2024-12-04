@@ -85,6 +85,7 @@ db.serialize(() => {
         title VARCHAR(255) NOT NULL,
         isbn VARCHAR(20) NOT NULL UNIQUE,
         author VARCHAR(100) NOT NULL,
+        description TEXT(500),
         total_copies INTEGER NOT NULL,
         available_copies INTEGER NOT NULL,
         cover_image BLOB
@@ -325,94 +326,149 @@ app.get('/available-books', (req, res) => {
 });
 
 
-  // Request a book
-  app.post('/borrow-book', (req, res) => {
-    const { studentId, firstName, lastName, email, contactNumber, borrowerType, department, books } = req.body;
-  
-    // Validate required fields
-    if (!studentId || !firstName || !lastName || !email || !contactNumber || !borrowerType || !department || !books.length) {
-      return res.status(400).json({ message: 'All fields are required.' });
-    }
-  
-    // Validate borrower type
-    const validTypes = ['student', 'faculty', 'employee'];
-    if (!validTypes.includes(borrowerType)) {
-      return res.status(400).json({ message: 'Invalid borrower type.' });
-    }
-  
-    // Define book limits per borrower type
-    const rules = {
-      student: { maxBooks: 3, dueDays: 7 },
-      faculty: { maxBooks: 10, dueDays: 120 }, // 1 semester (~120 days)
-      employee: { maxBooks: 10, dueDays: 7 },
-    };
-  
-    const { maxBooks } = rules[borrowerType];
-  
-    // Enforce book limit
-    if (books.length > maxBooks) {
-      return res.status(400).json({ message: `${borrowerType}s can only borrow up to ${maxBooks} books.` });
-    }
-  
-    // Step 1: Insert or Update Borrower Info in `borrowers` Table
-    db.run(
-      `INSERT INTO borrowers (borrower_id, first_name, last_name, email, contact_number, borrower_type, department) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(borrower_id) DO UPDATE SET 
-       first_name = excluded.first_name, 
-       last_name = excluded.last_name, 
-       email = excluded.email, 
-       contact_number = excluded.contact_number,
-       borrower_type = excluded.borrower_type,
-       department = excluded.department`,
-      [studentId, firstName, lastName, email, contactNumber, borrowerType, department], // Include department
-      function (err) {
-        if (err) {
-          console.error('Error inserting/updating borrower:', err.message);
-          return res.status(500).json({ message: 'Error saving borrower info' });
-        }
-  
-        // Step 2: Insert Borrow Request in `book_req` Table
-        db.run('INSERT INTO book_req (borrower_id) VALUES (?)', [studentId], function (err) {
-          if (err) {
-            console.error('Error creating borrow request:', err.message);
-            return res.status(500).json({ message: 'Error creating borrow request' });
-          }
-  
-          const borrowRequestId = this.lastID;
-  
-          // Step 3: Bulk Insert Books into `borrowed_books` Table
-          const insertBooks = books.map((book) => {
-            return new Promise((resolve, reject) => {
-              console.log('Inserting book:', book.value); // Ensure this logs the correct book ID
-              db.run(
-                'INSERT INTO borrowed_books (req_id, book_id, due_date) VALUES (?, ?, ?)',
-                [borrowRequestId, book.value, null],  // Use book.value instead of book.book_id
-                function (err) {
-                  if (err) {
-                    console.error('Error inserting borrowed book:', err.message);
-                    return reject(err);
-                  }
-                  resolve();
-                }
-              );
-            });
-          });
-  
-          // Wait for all books to be inserted
-          Promise.all(insertBooks)
-            .then(() => {
-              res.status(201).json({ message: 'Borrow request successfully registered.' });
-            })
-            .catch((err) => {
-              console.error('Error inserting books:', err.message);
-              res.status(500).json({ message: 'Error registering borrowed books.' });
-            });
-        });
+// Request a book
+app.post('/borrow-book', (req, res) => {
+  const { studentId, firstName, lastName, email, contactNumber, borrowerType, department, books } = req.body;
+
+  // Validate required fields
+  if (!studentId || !firstName || !lastName || !email || !contactNumber || !borrowerType || !department || !books.length) {
+    return res.status(400).json({ message: 'All fields are required.' });
+  }
+
+  // Validate borrower type
+  const validTypes = ['student', 'faculty', 'employee'];
+  if (!validTypes.includes(borrowerType)) {
+    return res.status(400).json({ message: 'Invalid borrower type.' });
+  }
+
+  // Define book limits per borrower type
+  const rules = {
+    student: { maxBooks: 3, dueDays: 7 },
+    faculty: { maxBooks: 10, dueDays: 120 }, // 1 semester (~120 days)
+    employee: { maxBooks: 10, dueDays: 7 },
+  };
+
+  const { maxBooks } = rules[borrowerType];
+
+  // Enforce book limit
+  if (books.length > maxBooks) {
+    return res.status(400).json({ message: `${borrowerType}s can only borrow up to ${maxBooks} books.` });
+  }
+
+  // Step 1: Insert or Update Borrower Info in `borrowers` Table
+  db.run(
+    `INSERT INTO borrowers (borrower_id, first_name, last_name, email, contact_number, borrower_type, department) 
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(borrower_id) DO UPDATE SET 
+     first_name = excluded.first_name, 
+     last_name = excluded.last_name, 
+     email = excluded.email, 
+     contact_number = excluded.contact_number,
+     borrower_type = excluded.borrower_type,
+     department = excluded.department`,
+    [studentId, firstName, lastName, email, contactNumber, borrowerType, department],
+    function (err) {
+      if (err) {
+        console.error('Error inserting/updating borrower:', err.message);
+        return res.status(500).json({ message: 'Error saving borrower info' });
       }
-    );
+
+      // Step 2: Insert Borrow Request in `book_req` Table
+      db.run('INSERT INTO book_req (borrower_id) VALUES (?)', [studentId], function (err) {
+        if (err) {
+          console.error('Error creating borrow request:', err.message);
+          return res.status(500).json({ message: 'Error creating borrow request' });
+        }
+
+        const borrowRequestId = this.lastID;
+
+        // Step 3: Bulk Insert Books into `borrowed_books` Table
+        const insertBooks = books.map((book) => {
+          return new Promise((resolve, reject) => {
+            db.run(
+              'INSERT INTO borrowed_books (req_id, book_id, due_date) VALUES (?, ?, ?)',
+              [borrowRequestId, book.value, null],
+              function (err) {
+                if (err) {
+                  console.error('Error inserting borrowed book:', err.message);
+                  return reject(err);
+                }
+                resolve();
+              }
+            );
+          });
+        });
+
+        // Wait for all books to be inserted
+        Promise.all(insertBooks)
+          .then(() => {
+            // Return success response with borrow request ID
+            res.status(201).json({
+              message: 'Borrow request successfully registered.',
+              requestId: borrowRequestId, // Include the request ID in the response
+            });
+          })
+          .catch((err) => {
+            console.error('Error inserting books:', err.message);
+            res.status(500).json({ message: 'Error registering borrowed books.' });
+          });
+      });
+    }
+  );
+});
+
+// Backend route to get tracking URL
+app.get('/generate-qr/:req_id', (req, res) => {
+  const { req_id } = req.params;
+  const trackingURL = `http://localhost:3000/track-request/${req_id}`;
+  res.json({ trackingURL });
+});
+
+// Track the status of a borrow request
+app.get('/track-request/:req_id', (req, res) => {
+  const { req_id } = req.params;
+
+  const query = `
+    SELECT 
+      br.status AS request_status,
+      b.first_name || ' ' || b.last_name AS borrower_name,
+      ab.title AS book_title,
+      bb.due_date AS due_date,
+      bb.hours_due AS hours_due,
+      bb.penalty AS penalty,
+      bb.book_status AS book_status
+    FROM book_req br
+    JOIN borrowers b ON br.borrower_id = b.borrower_id
+    JOIN borrowed_books bb ON br.req_id = bb.req_id
+    JOIN available_books ab ON bb.book_id = ab.book_id
+    WHERE br.req_id = ?;
+  `;
+
+  db.all(query, [req_id], (err, rows) => {
+    if (err) {
+      console.error('Error fetching request details:', err.message);
+      return res.status(500).json({ message: 'Error fetching request details.' });
+    }
+
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'Request not found.' });
+    }
+
+    // Group data into a structured format
+    const { borrower_name, request_status } = rows[0];
+    const books = rows.map(row => ({
+      title: row.book_title,
+      due_date: row.due_date,
+      hours_due: row.hours_due,
+      penalty: row.penalty,
+      status: row.book_status,
+    }));
+
+    res.status(200).json({ borrower_name, request_status, books });
   });
-  
+});
+
+
 
 
 
@@ -1430,9 +1486,10 @@ app.get("/categories", (req, res) => {
     }
   });
 });
+
 // Add new book with image
 app.post("/books", upload.single("cover_image"), (req, res) => {
-  const { title, isbn, author, total_copies, available_copies, categories } = req.body;
+  const { title, isbn, author, total_copies, available_copies, description, categories } = req.body;
   const coverImage = req.file ? req.file.buffer : null;
 
   // Parse categories from JSON string (if necessary)
@@ -1446,16 +1503,16 @@ app.post("/books", upload.single("cover_image"), (req, res) => {
     }
   }
 
-  // SQL query to insert book into available_books table
+  // SQL query to insert book into available_books table with description
   const sql = `
-    INSERT INTO available_books (title, isbn, author, total_copies, available_copies, cover_image)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO available_books (title, isbn, author, total_copies, available_copies, description, cover_image)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `;
 
   // Insert the book into the database
   db.run(
     sql,
-    [title, isbn, author, total_copies, available_copies, coverImage],
+    [title, isbn, author, total_copies, available_copies, description, coverImage],
     function (err) {
       if (err) {
         console.error(err.message);
@@ -1490,36 +1547,56 @@ app.post("/books", upload.single("cover_image"), (req, res) => {
 });
 
 
-//Book Details
+// Get Book Details
 app.get("/book/:bookId", (req, res) => {
   const { bookId } = req.params;
 
-  const query = "SELECT * FROM available_books WHERE book_id = ?";
-  db.get(query, [bookId], (err, row) => {
+  const query = `
+    SELECT b.*, 
+           c.name AS category_name
+    FROM available_books AS b
+    LEFT JOIN book_categories AS bc ON b.book_id = bc.book_id
+    LEFT JOIN categories AS c ON bc.category_id = c.category_id
+    WHERE b.book_id = ?
+  `;
+
+  db.all(query, [bookId], (err, rows) => {
     if (err) {
       console.error("Error fetching book:", err);
       return res.status(500).json({ error: "An error occurred while fetching the book data." });
     }
 
-    if (!row) {
+    if (!rows || rows.length === 0) {
       return res.status(404).json({ error: "Book not found." });
     }
 
+    // Initialize the book data from the first row
+    const book = { ...rows[0] };
+
+    // Extract the categories from the result rows
+    const categories = rows.map(row => row.category_name).filter(name => name);
+
     // Convert the BLOB image to Base64 if the cover_image field is not null
-    if (row.cover_image) {
-      const base64Image = Buffer.from(row.cover_image).toString('base64');
-      row.cover_image = `data:image/jpeg;base64,${base64Image}`; // Adjust the MIME type as needed (e.g., image/png)
+    if (book.cover_image) {
+      const base64Image = Buffer.from(book.cover_image).toString('base64');
+      book.cover_image = `data:image/jpeg;base64,${base64Image}`; // Adjust the MIME type as needed (e.g., image/png)
     }
 
-    res.json(row);
+    // Attach the categories to the book data
+    book.categories = categories;
+
+    // Send the response with the book data and categories
+    res.json(book);
   });
 });
 
 
-// API endpoint to update book information with image
-app.put('/book/:bookId', upload.single('cover_image'), async (req, res) => {
+
+
+// Edit Book
+app.put('/book-edit/:bookId', upload.single('cover_image'), async (req, res) => {
   const { bookId } = req.params;
-  const { title, isbn, author, total_copies, available_copies } = req.body;
+  const { title, isbn, author, total_copies, available_copies, description } = req.body;
 
   // Check if the uploaded file exceeds the size limit
   if (req.file && req.file.size > 1 * 2048 * 2048) {
@@ -1538,10 +1615,10 @@ app.put('/book/:bookId', upload.single('cover_image'), async (req, res) => {
     // Determine coverImageData based on whether a new image was uploaded
     let coverImageData = req.file ? req.file.buffer : currentBook.cover_image; // Use existing image if no new image
 
-    // Update book data in the database
+    // Update book data in the database, including the description
     const result = await db.run(
-      `UPDATE available_books SET title = ?, isbn = ?, author = ?, total_copies = ?, available_copies = ?, cover_image = ? WHERE book_id = ?`,
-      [title, isbn, author, total_copies, available_copies, coverImageData, bookId]
+      `UPDATE available_books SET title = ?, isbn = ?, author = ?, total_copies = ?, available_copies = ?, cover_image = ?, description = ? WHERE book_id = ?`,
+      [title, isbn, author, total_copies, available_copies, coverImageData, description, bookId]
     );
 
     if (result.changes === 0) {
@@ -1554,6 +1631,7 @@ app.put('/book/:bookId', upload.single('cover_image'), async (req, res) => {
     res.status(500).json({ error: 'An error occurred while updating the book' });
   }
 });
+
 
 // Endpoint to get borrowers for a specific book
 app.get('/book-requests/:bookId', (req, res) => {
