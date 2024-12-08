@@ -1282,8 +1282,6 @@ app.get("/api/borrowers/type-distribution", (req, res) => {
       );
     });
   });
-  
-
 
  // Reject a request
  app.post('/reject-request', (req, res) => {
@@ -1314,7 +1312,6 @@ app.get("/api/borrowers/type-distribution", (req, res) => {
     }
   );
 });
-
 
  // Return a request
  app.post('/return-request', (req, res) => {
@@ -1374,6 +1371,7 @@ app.delete('/delete-request/:reqId', async (req, res) => {
   }
 });
 
+//Delete Book
 app.delete('/delete-book/:bookId', async (req, res) => {
   const { bookId } = req.params;
 
@@ -1392,6 +1390,87 @@ app.delete('/delete-book/:bookId', async (req, res) => {
     res.status(500).json({ error: 'An error occurred while deleting the book' });
   }
 });
+
+
+//Renew Book
+const rules = {
+  student: 7, // 7 days
+  faculty: 120, // 1 semester (~120 days)
+  employee: 7, // 7 days
+};
+
+app.post('/renew-book', async (req, res) => {
+  const { book_id, req_id, borrower_type } = req.body;
+  console.log(book_id, req_id, borrower_type);
+
+  // Validate input
+  if (!book_id || !req_id || !borrower_type) {
+    return res.status(400).json({ error: 'book_id, req_id, and borrower_type are required' });
+  }
+
+  // Check if the borrower type exists in rules
+  const renewalDays = rules[borrower_type];
+  if (!renewalDays) {
+    return res.status(400).json({ error: `Invalid borrower type: ${borrower_type}` });
+  }
+
+  console.log(`Renewal Days: ${renewalDays}`);
+
+  try {
+    // Update the due date directly in the database using SQLite's DATE function
+    const result = await db.run(
+      `UPDATE borrowed_books
+       SET due_date = DATE(due_date, ?),
+           hours_due = 0,
+           penalty = 0
+       WHERE book_id = ? AND req_id = ?`,
+      [`+${renewalDays} days`, book_id, req_id]
+    );
+    
+    
+
+    console.log(`Rows affected: ${result.changes}`);
+
+    if (result.changes === 0) {
+      return res.status(404).json({ error: 'No matching record found to renew' });
+    }
+
+    res.json({ message: 'Book renewed successfully' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'An error occurred while renewing the book' });
+  }
+});
+
+
+
+//Remove Book
+app.delete('/remove-book', async (req, res) => {
+  const { book_id, req_id } = req.body;
+
+  // Validate input
+  if (!book_id || !req_id) {
+    return res.status(400).json({ error: 'book_id and req_id are required' });
+  }
+
+  try {
+    // Delete query
+    const result = await db.run(
+      `DELETE FROM borrowed_books WHERE book_id = ? AND req_id = ?`,
+      [book_id, req_id]
+    );
+
+    if (result.changes === 0) {
+      return res.status(404).json({ error: 'No matching record found to delete' });
+    }
+
+    res.json({ message: 'Book removed successfully' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'An error occurred while removing the book' });
+  }
+});
+
 
 
 // Show Total Books (Unique Book Count)
@@ -1683,12 +1762,7 @@ app.get('/book-requests/:bookId', (req, res) => {
 
 
 
-
-
-
-
-
-// Cron job that runs every hour
+// Cron job for calculating penalty
 cron.schedule('0 * * * *', () => {
   console.log('Running hourly job to update hours_due and penalties...');
 
@@ -1699,7 +1773,7 @@ cron.schedule('0 * * * *', () => {
   const query = `
     SELECT borrow_id, due_date 
     FROM borrowed_books 
-    WHERE due_date < CURRENT_DATE AND book_status = 'UNRETURNED';  
+    WHERE due_date < CURRENT_DATE;  
   `;
 
   db.all(query, (err, rows) => {
@@ -1732,15 +1806,14 @@ cron.schedule('0 * * * *', () => {
   });
 });
 
-// Function to update approved status to overdue
+// Cron for updating book status
 const updateOverdueStatuses = () => {
   const updateQuery = `
-  UPDATE book_req
-  SET status = 'Overdue'
-  FROM borrowed_books bb
-  WHERE book_req.req_id = bb.req_id 
-    AND bb.due_date < DATE('now') 
-    AND book_req.status != 'Overdue';
+  UPDATE borrowed_books
+  SET book_status = 'OVERDUE'
+  WHERE due_date < DATE('now')
+  AND book_status != 'OVERDUE';
+
   `;
   
   
@@ -1752,9 +1825,48 @@ const updateOverdueStatuses = () => {
     }
   });
   };
-  
-// Schedule updateOverdueStatuses to run every hour
 cron.schedule('0 * * * *', updateOverdueStatuses);
+
+//Cron for updating request status
+cron.schedule('0 * * * *', () => {
+  console.log('Running overdue check...');
+
+  // Query to find requests with associated overdue books
+  const query = `
+    SELECT br.req_id
+    FROM book_req br
+    JOIN borrowed_books bb ON br.req_id = bb.req_id
+    WHERE bb.book_status = 'OVERDUE'
+    GROUP BY br.req_id;
+  `;
+
+  db.all(query, [], (err, rows) => {
+    if (err) {
+      console.error('Error checking for overdue requests:', err);
+      return;
+    }
+
+    if (rows.length === 0) {
+      console.log('No overdue requests found.');
+      return;
+    }
+
+    // Update the status of each overdue request
+    rows.forEach(row => {
+      db.run(
+        `UPDATE book_req SET status = 'Overdue' WHERE req_id = ?`,
+        [row.req_id],
+        (updateErr) => {
+          if (updateErr) {
+            console.error(`Error updating request ${row.req_id}:`, updateErr);
+          } else {
+            console.log(`Request ${row.req_id} status updated to Overdue.`);
+          }
+        }
+      );
+    });
+  });
+});
 
 
 // POST endpoint to update book status
@@ -1790,7 +1902,6 @@ app.post('/update-book-status/:bookId', async (req, res) => {
     res.status(500).json({ error: 'An error occurred while updating book status' });
   }
 });
-
 
 // Fetch request details by requestId
 app.get('/req/:id', (req, res) => {
@@ -1864,7 +1975,37 @@ app.get('/req/:id', (req, res) => {
   });
 });
 
+//Get a specific borrower's requests
+app.get('/api/borrowers/:borrowerId/requests', async (req, res) => {
+  const { borrowerId } = req.params;
 
+  try {
+    // Query to fetch the borrower's requests
+    const query = `
+      SELECT br.req_id, br.status, br.req_created, br.req_approve, br.overdue_days
+      FROM book_req br
+      WHERE br.borrower_id = ?
+    `;
+    
+    // Execute the query with the borrowerId
+    db.all(query, [borrowerId], (err, rows) => {
+      if (err) {
+        console.error('Error executing query:', err);
+        return res.status(500).json({ error: 'An error occurred while fetching borrower requests.' });
+      }
+
+      if (rows.length === 0) {
+        return res.status(404).json({ message: 'No requests found for this borrower.' });
+      }
+
+      // Return the requests data
+      res.status(200).json(rows);
+    });
+  } catch (error) {
+    console.error('Error fetching borrower requests:', error);
+    res.status(500).json({ error: 'An error occurred while fetching borrower requests.' });
+  }
+});
 // Start the server
 app.listen(port, () => {
     console.log('Server is running on http://localhost:5000');
