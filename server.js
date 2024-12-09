@@ -420,7 +420,7 @@ app.post('/borrow-book', (req, res) => {
 // Backend route to get tracking URL
 app.get('/generate-qr/:req_id', (req, res) => {
   const { req_id } = req.params;
-  const trackingURL = `http://localhost:3000/track-request/${req_id}`;
+  const trackingURL = `https://book-master-new.vercel.app/track-request/${req_id}`;
   res.json({ trackingURL });
 });
 
